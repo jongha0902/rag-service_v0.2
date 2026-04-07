@@ -290,7 +290,7 @@ def detect_nexacro_message(driver, wait):
     return None
 
 
-def process_step(driver, wait, actions, step , target_date, genInfo ):
+def process_step(driver, wait, actions, step , target_date, gen_cd):
     action_type = step.get("action")
     by = step.get("by", "xpath")
     selector = step.get("selector")
@@ -385,7 +385,7 @@ def process_step(driver, wait, actions, step , target_date, genInfo ):
             tmpmid = get_temperature_summary(target_date, step["region_id"])
 
         elif action_type == "analbidinit":      
-            vgen_cd = genInfo[:4]     # genInfo는 "7284 통영천연가스CC" 형태로 가정
+            vgen_cd = gen_cd
             result = call_api.analexec(target_date, vgen_cd, "0")
             decision = step.get("next")
             judg = extract_judgement(result)
@@ -461,9 +461,6 @@ def process_step(driver, wait, actions, step , target_date, genInfo ):
 
     except Exception as e:
         return {"status": "fail", "step": step, "message": str(e)}
-
-
-import re
 
 def extract_judgement(text):
     # '최종판정', '최종 판정', '판정' 등 다양한 경우를 탐지
@@ -557,119 +554,196 @@ def select_flow_ui(flows):
     
     return selected_flow_id.get()
 
-def run_automation_by_flowid_ui(db_path, target_date):
+import threading  # [필수] 스레드 확인을 위해 상단에 필요합니다
+
+def run_automation_by_flowid_ui(db_path, target_date=None, gen_code=None):
+
+    # [수정] 메인 스레드인지 확인 (서버에서 호출 시 False가 됨)
+    is_main_thread = threading.current_thread() is threading.main_thread()
+
+    # 1. 로그 수집을 위한 리스트 생성
+    logs = []
+    def log(msg):
+        print(msg)
+        logs.append(msg)
+
+    log(f"🚀 [UI 실행] 시작 - 날짜: {target_date}, 발전기: {gen_code}")
     
-    rule_map = load_db_rules(db_path)
-    flows = list_flows(db_path)
-    genInfo = "7284 통영천연가스CC"
-    print(f"rule_map >> {rule_map}")
-    print(f"flows >> {flows}")
+    if not is_main_thread:
+        log("⚠️ [주의] 백그라운드 실행 중: 시각화 UI(Tkinter)는 표시되지 않습니다.")
+
+    # 3. DB 규칙 및 Flow 목록 로드
+    try:
+        rule_map = load_db_rules(db_path)
+        flows = list_flows(db_path)
+    except Exception as e:
+        log(f"❌ DB 로딩 실패: {e}")
+        return "\n".join(logs)
 
     if not flows:
-        print("❌ 사용할 수 있는 FLOW가 없습니다.")
-        return
+        log("❌ 사용할 수 있는 FLOW가 없습니다.")
+        return "\n".join(logs)
 
     flow_id = select_flow_ui(flows)
     if not flow_id:
-        print("🚫 실행이 취소되었습니다.")
-        return
+        log("🚫 실행이 취소되었습니다.")
+        return "\n".join(logs)
 
     try:
         flow_data = load_flow_by_id(db_path, flow_id)
     except Exception as e:
-        print(f"❌ 오류: {e}")
-        return
+        log(f"❌ Flow 데이터 로딩 오류: {e}")
+        return "\n".join(logs)
 
     node_sequence = get_execution_sequence(flow_data)
     nodes = {n["id"]: n for n in flow_data["nodes"]}
 
-    print(f"\n▶ 실행 노드 순서: {node_sequence}")
+    log(f"▶ 실행 노드 순서: {len(node_sequence)}개 단계")
 
-    # ✅ 시각화 초기화
-    start_visualizer_thread(flow_data)
-    driver = get_driver(headless=False)
-    wait = WebDriverWait(driver, 15)
-    actions = ActionChains(driver)
+    # 4. 시각화 및 브라우저 실행 준비
+    # [수정] 메인 스레드일 때만 UI 창 띄우기 (안 그러면 서버 죽음)
+    if is_main_thread:
+        start_visualizer_thread(flow_data)
+    
+    driver = None
+    wait = None
+    actions = None
+    
     step_results = []
+    has_critical_error = False  # 🚩 [핵심] 치명적 에러 발생 여부 플래그
+    
+    # 🚩 [추가] 현재 어떤 작업을 하고 있는지 기록하는 변수 (오류 추적용)
+    current_context = "브라우저 초기화 및 시작"
 
-    visited = set()
-    next_node_override = None
-    current_index = 0
+    try:
+        # 브라우저 시작
+        driver = get_driver(headless=False)
+        wait = WebDriverWait(driver, 15)
+        actions = ActionChains(driver)
 
-    while current_index < len(node_sequence):
-        if next_node_override:
-            node_id = next_node_override
-            next_node_override = None
-        else:
-            node_id = node_sequence[current_index]
-            current_index += 1
+        visited = set()
+        next_node_override = None
+        current_index = 0
 
-        if node_id in visited:
-            continue
-        visited.add(node_id)
+        # Flow 실행 루프
+        while current_index < len(node_sequence):
+            # 1. 다음 노드 결정
+            current_context = "다음 실행 단계 계산 중"
+            
+            if next_node_override:
+                node_id = next_node_override
+                next_node_override = None
+            else:
+                node_id = node_sequence[current_index]
+                current_index += 1
 
-        node = nodes.get(node_id, {})
-        print(f"612---NODE={node}")
-        rule_id = node.get("ruleId")
-        rule_name = node.get("ruleName")
-        if node.get("type") == "end":
-            print("🛑 End 노드 도달")
-            break
+            if node_id in visited:
+                continue
+            visited.add(node_id)
 
-        print(f"618---RULE_MAP={rule_map}")
-        print(f"619---RULE_ID={rule_id}")
-        print(f"620---RULE_NAME={rule_name}")
-        if not rule_id or rule_id not in rule_map:
-            print(f"⚠️ RULE_ID={rule_id} 를 찾을 수 없습니다.")
-            continue
+            node = nodes.get(node_id, {})
+            rule_id = node.get("ruleId")
+            rule_name = node.get("ruleName")
 
-        rule = rule_map.get(rule_id)
-        if not rule:
-            print(f"⚠️ RULE_ID={rule_id} 를 찾을 수 없습니다.")
-            continue
+            # End 노드 체크
+            if node.get("type") == "end":
+                log("🛑 End 노드 도달 (완료)")
+                break
 
-        if rule.get("url"):
-            print(f"🌐 접속: {rule['url']}")
-            driver.get(rule["url"])
-            time.sleep(3)
+            # Rule ID 유효성 체크
+            current_context = f"규칙 정보 로딩: {rule_name}"
+            if not rule_id or rule_id not in rule_map:
+                # log(f"⚠️ RULE_ID={rule_id} 를 찾을 수 없어 건너뜁니다.")
+                continue
 
-        print(f"▶ 실행 중: RULE_ID={rule_id} | RULE_NAME={rule_name}")
+            rule = rule_map.get(rule_id)
+            
+            # URL 접속 처리
+            if rule.get("url"):
+                # [수정] 접속 시도 중임을 기록
+                current_context = f"사이트 접속 시도: {rule_name} ({rule['url']})"
+                log(f"🌐 이동: {rule_name} ({rule['url']})")
+                driver.get(rule["url"])
+                time.sleep(3)
+            else:
+                current_context = f"로직 실행 진입: {rule_name}"
+                log(f"▶ 실행: {rule_name}")
 
-        for step in rule.get("steps", []):
-            if step.get("value") == "next_day":
-                step["value"] = (datetime.now() + timedelta(days=1)).strftime("%Y%m%d")
+            # 해당 Rule의 각 Step 실행
+            steps = rule.get("steps", [])
+            for i, step in enumerate(steps):
+                # [수정] 현재 수행 중인 스텝 라벨 기록
+                step_label = step.get('label') or step.get('selector') or f"Step-{i+1}"
+                current_context = f"작업 수행 중: [{rule_name}] -> [{step_label}]"
 
-            result = process_step(driver, wait, actions, step, target_date,  genInfo )
-            result["nodeId"] = rule_name  # 이름 기반으로 표시
-            step_results.append(result)
+                # 특수 값 변환 (예: next_day)
+                if step.get("value") == "next_day":
+                    step["value"] = (datetime.now() + timedelta(days=1)).strftime("%Y%m%d")
 
-            # ✅ 노드 상태 업데이트 + 라벨 유지
-            icon = "✅" if result["status"] == "success" else "❌" if result["status"] == "fail" else "⚠️"
-            update_node_status_safe(node_id, result["status"], rule_name )
+                # Step 처리 (인자 전달)
+                result = process_step(driver, wait, actions, step, target_date, gen_code)
+                result["nodeId"] = rule_name
+                step_results.append(result)
 
-            _visual_root.update_idletasks()
-            _visual_root.update()
+                # 시각화 상태 업데이트 (UI 스레드 안전 처리)
+                # [수정] 메인 스레드일 때만 UI 업데이트 시도
+                if is_main_thread:
+                    update_node_status_safe(node_id, result["status"], rule_name)
+                    try:
+                        if _visual_root:
+                            _visual_root.update_idletasks()
+                            _visual_root.update()
+                    except Exception:
+                        pass
 
-            if result["status"] == "branch" and result.get("next"):
-                next_label = result["next"]
-                next_node_id = find_next_node_by_label(flow_data, node_id, next_label)
-                if next_node_id:
-                    print(f"🔀 분기 이동: {node_id} ➝ {next_node_id} (label: {next_label})")
-                    next_node_override = next_node_id
-                    break
+                # 실행 결과에 따른 분기 처리
+                if result["status"] == "fail":
+                    log(f"❌ [Step 실패] {rule_name}: {result['message']}")
+                    # 필요 시 여기서 break 하여 즉시 중단할 수 있음
+                
+                elif result["status"] == "branch" and result.get("next"):
+                    next_label = result["next"]
+                    next_node_id = find_next_node_by_label(flow_data, node_id, next_label)
+                    if next_node_id:
+                        log(f"🔀 분기 이동: {next_label}")
+                        next_node_override = next_node_id
+                        break
 
-            elif result["status"] == "fail":
-                print(f"❌ Step 실패: {result['step'].get('label', '')} - {result['message']}")
+    except Exception as e:
+        has_critical_error = True  # 🚩 에러 발생 표시
+        # [수정] 에러 로그에 '작업 위치'와 '핵심 에러 메시지'만 깔끔하게 출력
+        log(f"\n💥 [치명적 오류 발생]")
+        log(f"   👉 작업 위치: {current_context}")
+        log(f"   👉 오류 내용: {str(e).split('Stacktrace')[0].strip()}")
 
-    print("\n📋 실행 결과 요약:")
-    for i, result in enumerate(step_results, 1):
-        status_icon = "✅" if result["status"] == "success" else "❌"
-        label = result["step"].get("label", "") or result["step"].get("selector", "")
-        print(f"{i:02d}. {status_icon} {label} - {result['message']}")
+    finally:
+        # 브라우저 종료
+        if driver:
+            try:
+                driver.quit()
+            except:
+                pass
 
-    print("\n✅ 전체 작업 완료. Enter 키를 누르면 종료됩니다.")
-    #input()
-    driver.quit()
+    # 5. 최종 결과 집계 및 로그 반환
+    log("\n📋 [최종 결과]")
+    
+    #success_count = sum(1 for r in step_results if r["status"] == "success")
+    #fail_count = sum(1 for r in step_results if r["status"] == "fail")
+
+    # [수정된 판정 로직]
+    if has_critical_error:
+        log(f"❌ [최종 실패] 시스템 오류로 인해 작업이 중단되었습니다.")
+        log(f"   👉 중단된 위치: {current_context}")
+        #log(f"   (진행된 성공: {success_count}건 / 실패: {fail_count}건)")
+    #elif fail_count > 0:
+        #log(f"❌ [부분 실패] 총 {fail_count}건의 단계가 실패했습니다.")
+        #log(f"   (성공: {success_count}건)")
+    #elif success_count == 0 and len(step_results) == 0:
+        #log("⚠️ [경고] 실행된 단계가 없습니다. (Flow 설정 오류 또는 실행 취소)")
+    else:
+        log("✅ [성공] 모든 단계가 정상적으로 완료되었습니다.")
+
+    return "\n".join(logs)
     
 def run_automation_by_flowid(db_path):
     rule_map = load_db_rules(db_path)
@@ -771,7 +845,9 @@ def run_automation_by_flowid(db_path):
     draw_execution_result(flow_data, step_results)
     input()
     driver.quit()
-# 아래 함수 수정:
+
+# 아래 함수 수정
+# 호출 부분이 없음
 def run_automation_by_flowid_ai(db_path, flow_id, vgenInfo, tradeYmd, log_callback=None, session_id=None):
     import time
     from datetime import datetime, timedelta

@@ -10,11 +10,13 @@ class Settings(BaseSettings):
 
     # --- [벡터 스토어 및 파일 경로 설정] ---
     DB_SCHEMA_VECTORSTORE_PATH: str       # Oracle 스키마 벡터스토어
-    DOC_VECTORSTORE_PATH: str             # 전력거래 규정 벡터스토어
-    
+    RULE_DOC_VECTORSTORE_PATH: str        # 전력거래 규정 벡터스토어
+    SETTLE_DOC_VECTORSTORE_PATH: str      # 정산해설서 벡터스토어
+
     # --- [데이터 파일 경로] ---
-    PDF_FILE_PATH: str
-    TXT_FILE_PATH: str
+    RULE_PDF_FILE_PATH: str
+    SETTLE_PDF_FILE_PATH: str
+    #TXT_FILE_PATH: str
     DB_PATH: str                # SQLite DB 경로
 
     # --- [모델 설정] ---

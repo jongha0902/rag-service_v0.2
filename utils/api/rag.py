@@ -227,23 +227,27 @@ async def ask_question(
             logger.info(f"📂 [File Upload] {len(file)} files received.")
             
             full_text_list = []
+            filenames = []
             for f in file:
                 txt = await read_file_content(f)
                 full_text_list.append(f"filename: {f.filename}\n{txt}")
+                filenames.append(f.filename)
             
             combined_context = "\n\n".join(full_text_list)
+            result = await execute_rag_task(query, session_id, combined_context, has_file, filenames)
 
         elif len(query) > 300 or CODE_PATTERN.search(query):
             logger.info("💻 [Code/Text Detected] Query treated as context.")
             combined_context = query
-
-        # RAG 실행 (비동기)
-        result = await execute_rag_task(
-            query=query,
-            session_id=session_id,
-            file_context=combined_context,
-            has_file=has_file
-        )
+            result = await execute_rag_task(query, session_id, combined_context, False)
+        else:
+            # 파일이 없는 일반 질문의 경우
+            result = await execute_rag_task(
+                query=query,
+                session_id=session_id,
+                file_context="",
+                has_file=False
+            )
 
         intent = result.get("intent", "UNKNOWN")
         answer = result.get("answer", "")

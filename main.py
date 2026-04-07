@@ -5,7 +5,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from contextlib import asynccontextmanager
 
 from utils.api.rag import router as rag_router
-from utils.ollama_rag import initialize_all_vectorstores, cleanup_expired_sessions
+from utils.ollama_rag import initialize_all_vectorstores
 
 # 로깅 설정
 logging.basicConfig(level=logging.INFO)
@@ -19,7 +19,7 @@ async def lifespan(app: FastAPI):
     initialize_all_vectorstores()
 
     # asyncio.create_task를 사용하여 메인 스레드를 차단하지 않고 실행
-    cleanup_task = asyncio.create_task(cleanup_expired_sessions())
+    #cleanup_task = asyncio.create_task(cleanup_expired_sessions())
 
     yield
     logger.info("🛑 앱 종료")

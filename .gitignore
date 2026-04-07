@@ -72,11 +72,15 @@ Thumbs.db
 
 # Local settings
 config.local.json
-data/db_schema_vectorstore/index.faiss
-data/db_schema_vectorstore/index.pkl
+data/db_schema_vectorstore/db_index.faiss
+data/db_schema_vectorstore/db_index.pkl
 data/db_schema_vectorstore/index - 복사본.faiss
 data/db_schema_vectorstore/index - 복사본.pkl
-data/doc_vectorstore/index.faiss
-data/doc_vectorstore/index.pkl
 data/doc_vectorstore/index - 복사본.faiss
 data/doc_vectorstore/index - 복사본.pkl
+data/doc_vectorstore/rule_doc/rule_index.faiss
+data/doc_vectorstore/rule_doc/rule_index.pkl
+data/doc_vectorstore/settle_doc/settle_index.faiss
+data/doc_vectorstore/settle_doc/settle_index.pkl
+piplist.txt
+data/2025_정산규칙_해설서.pdf
