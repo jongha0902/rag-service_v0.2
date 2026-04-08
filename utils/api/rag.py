@@ -7,6 +7,7 @@ import logging
 import io
 import re
 import zipfile
+import uuid
 
 # ----------------------------------------------------
 # 👇 RAG 관련 함수 (비동기) 
@@ -200,11 +201,11 @@ async def read_file_content(f: UploadFile) -> str:
 @router.post("/ask")
 async def ask_question(
     query: str = Form(...),
-    session_id: str = Form(...),
+    session_id: Optional[str] = Form(None), # Postman 호출 등을 위해 Optional 설정
     file: Optional[List[UploadFile]] = File(None)
 ):
     try:
-        # [보안 패치] 입력 쿼리 검증
+        # 1. [보안 패치] 입력 쿼리 검증
         if is_unsafe_query(query):
             logger.warning(f"⚠️ [Security Block] Unsafe query detected: {query}")
             return JSONResponse(
@@ -216,32 +217,58 @@ async def ask_question(
                 }
             )
 
+        # 2. session_id가 없을 경우(Postman 등) 자동 생성
+        if not session_id:
+            # 8자리 짧은 UUID 생성 (테이스 용이성)
+            session_id = f"session_{uuid.uuid4().hex[:8]}"
+            logger.info(f"🆔 [New Session] No session_id provided. Generated: {session_id}")
+
         combined_context = ""
         has_file = False
+        filenames = []
         
+        # 3. 파일 처리 로직
         if file:
             if len(file) > MAX_FILE_COUNT:
+                logger.warning(f"⚠️ [File Limit Exceeded] User tried to upload {len(file)} files.")
                 raise HTTPException(status_code=400, detail=f"파일은 최대 {MAX_FILE_COUNT}개까지만 가능합니다.")
             
             has_file = True
-            logger.info(f"📂 [File Upload] {len(file)} files received.")
+            logger.info(f"📂 [File Upload] {len(file)} files received for session: {session_id}")
             
             full_text_list = []
-            filenames = []
             for f in file:
+                # 파일 내용 읽기 유틸리티 호출
                 txt = await read_file_content(f)
                 full_text_list.append(f"filename: {f.filename}\n{txt}")
                 filenames.append(f.filename)
             
+            # 여러 파일의 내용을 하나로 합쳐서 컨텍스트 생성
             combined_context = "\n\n".join(full_text_list)
-            result = await execute_rag_task(query, session_id, combined_context, has_file, filenames)
+            
+            # RAG 작업 실행 (파일 컨텍스트 포함)
+            result = await execute_rag_task(
+                query=query, 
+                session_id=session_id, 
+                file_context=combined_context, 
+                has_file=True, 
+                filenames=filenames
+            )
 
+        # 4. 파일이 없지만 쿼리가 길거나 코드가 포함된 경우 (텍스트를 컨텍스트로 취급)
         elif len(query) > 300 or CODE_PATTERN.search(query):
-            logger.info("💻 [Code/Text Detected] Query treated as context.")
+            logger.info(f"💻 [Code/Long Text Detected] Treat query as context. Session: {session_id}")
             combined_context = query
-            result = await execute_rag_task(query, session_id, combined_context, False)
+            result = await execute_rag_task(
+                query=query, 
+                session_id=session_id, 
+                file_context=combined_context, 
+                has_file=False
+            )
+
+        # 5. 일반적인 짧은 질문 처리
         else:
-            # 파일이 없는 일반 질문의 경우
+            logger.info(f"💬 [General Query] Session: {session_id}")
             result = await execute_rag_task(
                 query=query,
                 session_id=session_id,
@@ -249,21 +276,27 @@ async def ask_question(
                 has_file=False
             )
 
+        # 6. 결과 파싱 및 응답 생성
         intent = result.get("intent", "UNKNOWN")
         answer = result.get("answer", "")
-        sources = result.get("sources", []) # 👈 출처 정보 가져오기
+        sources = result.get("sources", [])
         
-        logger.info(f"🤖 [Response] Intent: {intent}, Sources: {len(sources)}개")
+        logger.info(f"🤖 [Response] Session: {session_id}, Intent: {intent}, Sources: {len(sources)}")
 
-        return JSONResponse(status_code=200, content={
-            "intent": intent, 
-            "answer": answer,
-            "sources": sources # 👈 응답에 포함
-        })
+        return JSONResponse(
+            status_code=200, 
+            content={
+                "session_id": session_id, # 생성된 세션 ID를 클라이언트에 전달
+                "intent": intent, 
+                "answer": answer,
+                "sources": sources
+            }
+        )
 
     except HTTPException as he:
         logger.warning(f"⚠️ HTTPException: {he.detail}")
         raise he
     except Exception as e:
         logger.exception("❌ API Internal Error")
+        # 구체적인 에러 메시지를 응답에 포함 (개발 단계)
         raise HTTPException(status_code=500, detail=f"Internal Server Error: {str(e)}")

@@ -73,7 +73,7 @@ def get_full_db_schema():
     return documents
 
 # 2. 메타데이터 전수 조사 함수 (Hybrid Search용)
-def search_db_metadata(keyword: str):
+def search_db_metadata(keyword: str, include_code: bool = False): # include_code 옵션 추가
     if not keyword or len(keyword.strip()) < 2: return "키워드가 너무 짧습니다."
     
     results = []
@@ -82,36 +82,62 @@ def search_db_metadata(keyword: str):
     with get_oracle_conn() as conn:
         cursor = conn.cursor()
         
-        # (A) 테이블/컬럼 검색
+        # (A) 테이블/컬럼 검색 (SQL은 그대로 유지)
         sql_tab = """
-        SELECT DISTINCT t.table_name, t.comments 
-        FROM user_tab_columns c
-        JOIN user_tab_comments t ON c.table_name = t.table_name
-        LEFT JOIN user_col_comments cc ON c.table_name = cc.table_name AND c.column_name = cc.column_name
-        WHERE (upper(c.column_name) LIKE upper(:kw) 
-           OR upper(cc.comments) LIKE upper(:kw) 
-           OR upper(t.table_name) LIKE upper(:kw))
+        SELECT 
+            t.table_name, 
+            t.comments AS table_comments,
+            c.column_name,
+            c.data_type,
+            cc.comments AS column_comments
+          FROM user_tab_columns c
+          JOIN user_tab_comments t ON c.table_name = t.table_name
+          LEFT JOIN user_col_comments cc ON c.table_name = cc.table_name AND c.column_name = cc.column_name
+         WHERE t.table_name IN (
+            SELECT DISTINCT c2.table_name
+              FROM user_tab_columns c2
+              JOIN user_tab_comments t2 ON c2.table_name = t2.table_name
+              LEFT JOIN user_col_comments cc2 ON c2.table_name = cc2.table_name AND c2.column_name = cc2.column_name
+              WHERE (upper(c2.column_name) LIKE upper(:kw) 
+                 OR upper(cc2.comments) LIKE upper(:kw) 
+                 OR upper(t2.table_name) LIKE upper(:kw))
+        )
            AND t.table_name NOT LIKE 'BIN$%'
+          ORDER BY t.table_name, c.column_id
         """
         cursor.execute(sql_tab, kw=kw_pattern)
         rows = cursor.fetchall()
+        
         if rows:
-            results.append(f"=== [테이블] '{keyword}' 관련 검색 ===")
+            results.append(f"=== [테이블] '{keyword}' 관련 상세 정보 ===")
+            current_table = ""
             for r in rows:
-                results.append(f"- {r[0]} ({r[1] or ''})")
+                table_name, table_comm, col_name, col_type, col_comm = r
+                
+                # 새로운 테이블이 시작될 때 헤더 출력
+                if table_name != current_table:
+                    results.append(f"\n📍 테이블: {table_name} ({table_comm or '설명 없음'})")
+                    results.append(f"{'컬럼명':<20} | {'타입':<10} | {'설명'}")
+                    results.append("-" * 50)
+                    current_table = table_name
+                
+                # [수정된 부분] 모든 컬럼 정보를 한 줄씩 추가
+                col_info = f"{col_name:<20} | {col_type:<10} | {col_comm or ''}"
+                results.append(col_info)
             results.append("")
 
-        # (B) 소스코드 검색
-        sql_src = """
-        SELECT DISTINCT name, type FROM user_source 
-        WHERE (upper(name) LIKE upper(:kw) OR upper(text) LIKE upper(:kw)) AND name NOT LIKE 'BIN$%'
-        """
-        cursor.execute(sql_src, kw=kw_pattern)
-        rows = cursor.fetchall()
-        if rows:
-            results.append(f"=== [코드] '{keyword}' 관련 검색 ===")
-            for r in rows:
-                results.append(f"- [{r[1]}] {r[0]}")
+        # (B) 소스코드 검색 (include_code가 True일 때만 실행)
+        if include_code:
+            sql_src = """
+            SELECT DISTINCT name, type FROM user_source 
+            WHERE (upper(name) LIKE upper(:kw) OR upper(text) LIKE upper(:kw)) AND name NOT LIKE 'BIN$%'
+            """
+            cursor.execute(sql_src, kw=kw_pattern)
+            rows = cursor.fetchall()
+            if rows:
+                results.append(f"=== [코드] '{keyword}' 관련 검색 ===")
+                for r in rows:
+                    results.append(f"- [{r[1]}] {r[0]}")
 
     if not results: return "검색 결과 없음"
     return "\n".join(results)

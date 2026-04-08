@@ -4,6 +4,7 @@ import logging
 import torch
 import asyncio
 import re
+from utils.mcp_manager import mcp_manager
 from datetime import datetime, timedelta
 from typing import TypedDict, Dict, Any, Literal, List, Optional
 
@@ -487,33 +488,62 @@ async def classify_intent_logic(question: str, has_file=False, file_snippet=None
 
     # 🤖 [Step 2] 한국어 최적화 LLM 프롬프트 구성
     router_prompt = f"""
-    당신은 전력 시장 운영 시스템의 'AI 의도 분류기(Intent Router)'입니다.
-    사용자의 질문을 분석하여 정확히 하나의 카테고리로 분류하세요.
+        당신은 시스템 관리 및 RAG 서비스의 'AI 의도 분류기(Intent Router)'입니다.
+        사용자의 질문을 분석하여 정확히 하나의 카테고리로 분류하세요.
 
-    [컨텍스트]
-    질문: "{question}"
-    파일 상황: {file_info}
-    {feedback_ctx}
+        [컨텍스트]
+        질문: "{question}"
+        파일 상황: {file_info}
+        {feedback_ctx}
 
-    [분류 카테고리 및 우선순위]
-    1. AUTOMATION: 시스템 동작 실행 명령 (예: 로그인, 입찰 시작, 프로세스 실행).
-    2. CODE_ANALYSIS: 코드 스니펫 분석이나 특정 프로그래밍 로직에 대한 설명 요청.
-    3. VERSION_COMPARE: 업로드된 파일과 기존 규칙/문서 간의 차이점 비교 분석.
-    4. CROSS_CHECK: 'DB 객체(테이블/컬럼)'와 '비즈니스 규칙(정산 수식)'을 동시에 참조해야 하는 복합 질문.
-    5. DB_DESIGN: 신규 테이블 설계, 모델링 또는 DDL 생성 요청.
-    6. DB_SCHEMA: 테이블 구조, 컬럼 정의, ER-Diagram 등 단순 스키마 조회.
-    7. RULE_DOC: 전력시장 운영 규칙, 정산 방법론, 규칙서 내 수식 관련 질문.
-    8. FILE_ONLY: 오직 업로드된 파일의 내용 자체에 대한 질문이나 분석 요청.
-    9. GENERAL: 인사, 일상 대화 및 기타 기술적이지 않은 질문.
+        [분류 카테고리 및 우선순위]
+        1. AUTOMATION: 시스템 동작 실행 명령 (예: 프로세스 실행, 자동화 작업 시작).
+        2. CODE_ANALYSIS: 소스 코드 분석이나 프로그래밍 로직 설명 요청.
+        3. VERSION_COMPARE: 문서 간의 개정 내역이나 차이점 비교 분석.
+        4. CROSS_CHECK: 비즈니스 규칙과 DB 테이블 구조를 동시에 참조해야 하는 복합 질문.
+        5. DB_DESIGN: 신규 테이블 설계 또는 DDL(CREATE TABLE 등) 생성 요청.
+        6. DB_SCHEMA: 데이터베이스의 테이블 구조, 컬럼 정의, 스키마 자체에 대한 설명.
+        7. RULE_DOC: 운영 규칙, 가이드라인, 지침서 내용 관련 질문 (PDF 기반).
+        8. FILE_ONLY: 업로드된 파일의 내용에 대해서만 질문하거나 분석을 요청하는 경우.
+        9. LIVE_DB: 시스템 운영 및 관리 데이터 실시간 조회
+        10. GENERAL: 인사, 일상 대화 등 위 카테고리에 해당하지 않는 일반적인 질문.
 
-    [결정 원칙]
-    - 🚨 중요: 사용자가 파일을 업로드하고 "분석", "검토", "확인" 등을 요청하면 우선적으로 'FILE_ONLY'를 선택합니다.
-    - 'AUTOMATION'은 실제 시스템 제어(실행) 명령일 때만 사용하며, 단순 지식 질문에는 사용하지 마세요.
-    - 'async def', 'if/else' 등 코드가 포함된 질문은 'CODE_ANALYSIS'로 분류합니다.
-    - 정산 수식이나 시장 규정 자체를 묻는다면 'RULE_DOC'이 적절합니다.
+        [결정 원칙 (CRITICAL)]
+        - 사용자가 파일을 업로드하고 "분석", "검토" 등을 요청할 때만 'FILE_ONLY'를 선택합니다.
+        - 단순히 "안녕", "반가워" 같은 내용은 가장 마지막 순위인 'GENERAL'로 분류합니다.
 
-    출력 포맷: 반드시 카테고리 명칭(영문 대문자)만 한 단어로 응답하세요.
+        출력 포맷: 반드시 카테고리 명칭(영문 대문자)만 한 단어로 응답하세요.
     """
+    # router_prompt = f"""
+    # 당신은 전력 시장 운영 시스템의 'AI 의도 분류기(Intent Router)'입니다.
+    # 사용자의 질문을 분석하여 정확히 하나의 카테고리로 분류하세요.
+
+    # [컨텍스트]
+    # 질문: "{question}"
+    # 파일 상황: {file_info}
+    # {feedback_ctx}
+
+    # [분류 카테고리 및 우선순위]
+    # 1. AUTOMATION: 시스템 동작 실행 명령 (예: 로그인, 입찰 시작, 프로세스 실행).
+    # 2. CODE_ANALYSIS: 코드 스니펫 분석이나 특정 프로그래밍 로직에 대한 설명 요청.
+    # 3. VERSION_COMPARE: 업로드된 파일과 기존 규칙/문서 간의 차이점 비교 분석.
+    # 4. CROSS_CHECK: 'DB 객체(테이블/컬럼)'와 '비즈니스 규칙(정산 수식)'을 동시에 참조해야 하는 복합 질문.
+    # 5. DB_DESIGN: 신규 테이블 설계, 모델링 또는 DDL 생성 요청.
+    # 6. DB_SCHEMA: 테이블 구조, 컬럼 정의, ER-Diagram 등 단순 스키마 조회.
+    # 7. RULE_DOC: 전력시장 운영 규칙, 정산 방법론, 규칙서 내 수식 관련 질문.
+    # 8. FILE_ONLY: 오직 업로드된 파일의 내용 자체에 대한 질문이나 분석 요청.
+    # 9. GENERAL: 인사, 일상 대화 및 기타 기술적이지 않은 질문.
+    # 10. LIVE_DB: 실시간 전력 데이터 조회, 현재 입찰가 확인, 특정 발전기 상태 조회 등 실제 DB 데이터가 필요한 경우.
+
+    # [결정 원칙]
+    # - 🚨 중요: 사용자가 파일을 업로드하고 "분석", "검토", "확인" 등을 요청하면 우선적으로 'FILE_ONLY'를 선택합니다.
+    # - 'AUTOMATION'은 실제 시스템 제어(실행) 명령일 때만 사용하며, 단순 지식 질문에는 사용하지 마세요.
+    # - 'async def', 'if/else' 등 코드가 포함된 질문은 'CODE_ANALYSIS'로 분류합니다.
+    # - 정산 수식이나 시장 규정 자체를 묻는다면 'RULE_DOC'이 적절합니다.
+    # - 질문에 "현재", "실시간", "수치 확인", "조회해줘" 등이 포함되거나 구체적인 데이터 값이 필요하면 'LIVE_DB'를 선택하세요.
+
+    # 출력 포맷: 반드시 카테고리 명칭(영문 대문자)만 한 단어로 응답하세요.
+    # """
 
     try:
         # LLM 호출
@@ -522,7 +552,7 @@ async def classify_intent_logic(question: str, has_file=False, file_snippet=None
         
         # 유효한 카테고리 목록
         valid_categories = [
-            "AUTOMATION", "FILE_ONLY", "VERSION_COMPARE", "CROSS_CHECK", 
+            "LIVE_DB", "AUTOMATION", "FILE_ONLY", "VERSION_COMPARE", "CROSS_CHECK", 
             "DB_DESIGN", "CODE_ANALYSIS", "DB_SCHEMA", "RULE_DOC", "GENERAL"
         ]
 
@@ -540,9 +570,33 @@ async def classify_intent_logic(question: str, has_file=False, file_snippet=None
         return "FILE_ONLY" if has_file else "GENERAL"
 
 
+# utils/ollama_rag.py
+
 async def extract_keyword(question: str):
-    res = await llm.ainvoke(f"질문: '{question}' 핵심 키워드 하나만 추출. 없으면 FALSE")
-    return res.content.strip()
+    """
+    전력 시스템 전문가로서 질문에서 지식 검색이나 데이터 조회를 위한 핵심 키워드를 추출합니다.
+    """
+    prompt = f"""
+    당신은 전력시장 운영 및 시스템 관리 전문가입니다. 
+    사용자의 질문에서 '규정 검색'이나 '데이터 조회'에 공통적으로 사용될 수 있는 핵심 용어(명사) 하나만 추출하세요.
+    
+    [추출 가이드]
+    - 질문: "수요예측 테이블 데이터 조회해줘" -> 결과: 수요예측
+    - 질문: "전력시장 운영규칙 제5조 내용 알려줘" -> 결과: 운영규칙
+    - 질문: "API 키 상태 확인해줘" -> 결과: API키
+    - 질문: "조회", "보여줘", "알려줘" 같은 서술어는 절대 포함하지 마세요.
+
+    질문: "{question}"
+    결과:"""
+    
+    try:
+        res = await llm.ainvoke(prompt)
+        keyword = res.content.strip().replace("'", "").replace('"', "")
+        # 첫 단어만 반환 (불필요한 설명 방지)
+        return keyword.split()[0] if keyword else "FALSE"
+    except Exception as e:
+        logger.error(f"Keyword extraction failed: {e}")
+        return "FALSE"
 
 async def generate_sql_step_by_step(question: str, rule_context: str, db_context: str, session_id: str):
     prompt = f"""
@@ -667,6 +721,7 @@ async def rag_for_rules(question, session_id):
 async def ask_llm_general(question, session_id):
     ans = await ainvoke_chain_with_history(GENERAL_SYSTEM_PROMPT, question, "", session_id)
     return {"answer": ans, "context": "General Chat", "sources": []}
+
 
 
 # ==========================================================================
@@ -855,6 +910,66 @@ async def general_node(state: AgentState):
     res = await ask_llm_general(state["question"], state["session_id"])
     return {"answer": res["answer"], "context": res["context"], "sources": res["sources"], "attempts": state["attempts"] + 1}
 
+# utils/ollama_rag.py
+
+async def mcp_db_node(state: AgentState):
+    log_task_start("MCP_DB", state["attempts"])
+    q = state["question"]
+    session_id = state["session_id"]
+    
+    db_context = ""
+    
+    # 1. LLM을 통한 키워드 추출
+    keyword = await extract_keyword(q)
+    
+    # 2. 키워드 폴백 (기존 로직 유지)
+    if not keyword or keyword.upper() == "FALSE" or len(keyword) < 2:
+        clean_q = re.sub(r'[^\w\s]', '', q)
+        stop_words = ["조회해줘", "보여줘", "테이블", "데이터", "리스트", "찾아줘"]
+        for word in stop_words:
+            clean_q = clean_q.replace(word, "")
+        words = clean_q.split()
+        keyword = words[0] if words else None
+
+    # 3. MCP 서버 검색 및 컨텍스트 구성
+    if keyword and mcp_manager.session:
+        try:
+            # MCP 툴 호출 (여기서 SQL이 컬럼 정보를 포함하도록 수정되어 있어야 함)
+            mcp_res = await mcp_manager.session.call_tool(
+                "search_metadata", 
+                {"keyword": keyword, "include_code": False}
+            )
+            
+            if mcp_res and mcp_res.content:
+                raw_result = mcp_res.content[0].text
+
+                if "검색 결과 없음" not in raw_result:
+                    # [핵심 추가] LLM이 추측하지 않도록 가독성 있게 포맷팅
+                    # 만약 raw_result가 줄바꿈으로 구분된 데이터라면 여기서 예쁘게 다듬음
+                    formatted_context = f"\n### 🔍 DB 검색 결과 (키워드: {keyword})\n"
+                    formatted_context += "아래는 검색된 테이블의 실제 스키마 정보입니다. 반드시 이 컬럼명만 사용하세요.\n"
+                    formatted_context += raw_result  # MCP 서버에서 이미 포맷팅해서 준다면 그대로 사용
+                    
+                    db_context = formatted_context
+                else:
+                    logger.warning(f"⚠️ [MCP_DB] '{keyword}' 결과 없음")
+                
+        except Exception as e:
+            logger.error(f"❌ MCP 호출 실패: {e}")
+
+    # 4. 최종 답변 생성 (시스템 프롬프트에 '검색된 정보 기반' 강조)
+    # db_context가 비어있으면 LLM에게 검색 결과가 없음을 명시적으로 알림
+    context_for_llm = db_context if db_context else "해당 키워드와 관련된 테이블 정의를 찾을 수 없습니다. 아는 척하지 말고 정확한 테이블명을 물어보세요."
+
+    ans = await ainvoke_chain_with_history(RAG_DB_SYSTEM_PROMPT, q, context_for_llm, session_id)
+
+    return {
+        "answer": ans,
+        "context": db_context,
+        "sources": ["Oracle DB (Live)"] if db_context else [],
+        "attempts": state["attempts"] + 1
+    }
+
 async def validator_node(state: AgentState):
     current_answer = state["answer"]
     intent = state["intent"]
@@ -904,6 +1019,7 @@ def build_rag_graph():
     workflow.add_node("db_schema", db_schema_node)
     workflow.add_node("rule_doc", rule_doc_node)
     workflow.add_node("general", general_node)
+    workflow.add_node("mcp_db", mcp_db_node)
 
     workflow.set_entry_point("router")
 
@@ -916,7 +1032,8 @@ def build_rag_graph():
         "CODE_ANALYSIS": "code_analysis",
         "DB_SCHEMA": "db_schema",
         "RULE_DOC": "rule_doc",
-        "GENERAL": "general"
+        "GENERAL": "general",
+        "LIVE_DB": "mcp_db"
     } 
     workflow.add_conditional_edges("router", lambda x: x["intent"], intent_map)
 
