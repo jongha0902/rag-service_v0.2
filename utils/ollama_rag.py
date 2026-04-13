@@ -224,7 +224,7 @@ SESSION_TIMEOUT_MINUTES = 60
 
 llm = ChatOllama(
     model=Config.OLLAMA_MODEL,
-    #temperature=0.1,
+    temperature=0.1,
     base_url=Config.OLLAMA_BASE_URL
 )
 
@@ -408,18 +408,18 @@ def initialize_all_vectorstores():
     )
 
     rule_vectorstore = get_vectorstore_generic(
-        name="운영규칙",
+        name="전력거래시장운영규칙",
         folder_path=Config.RULE_DOC_VECTORSTORE_PATH,
         index_file_name="rule_index",
         loader_func=create_pdf_loader(Config.RULE_PDF_FILE_PATH)
     )
 
-    settle_vectorstore = get_vectorstore_generic(
-        name="정산규칙해설서",
-        folder_path=Config.SETTLE_DOC_VECTORSTORE_PATH,
-        index_file_name="settle_index",
-        loader_func=create_pdf_loader(Config.SETTLE_PDF_FILE_PATH)
-    )
+    # settle_vectorstore = get_vectorstore_generic(
+    #     name="정산규칙해설서",
+    #     folder_path=Config.SETTLE_DOC_VECTORSTORE_PATH,
+    #     index_file_name="settle_index",
+    #     loader_func=create_pdf_loader(Config.SETTLE_PDF_FILE_PATH)
+    # )
 
 
 def extract_sources(docs: List[Document]) -> List[str]:
@@ -509,7 +509,7 @@ async def classify_intent_logic(question: str, has_file=False, file_snippet=None
         10. GENERAL: 인사, 일상 대화 등 위 카테고리에 해당하지 않는 일반적인 질문.
 
         [결정 원칙 (CRITICAL)]
-        - 사용자가 파일을 업로드하고 "분석", "검토" 등을 요청할 때만 'FILE_ONLY'를 선택합니다.
+        - 사용자가 **파일을 업로드**하고 "분석", "검토" 등을 요청할 때만 'FILE_ONLY'를 선택합니다.
         - 단순히 "안녕", "반가워" 같은 내용은 가장 마지막 순위인 'GENERAL'로 분류합니다.
 
         출력 포맷: 반드시 카테고리 명칭(영문 대문자)만 한 단어로 응답하세요.
@@ -636,7 +636,7 @@ async def rag_for_db_design(question: str, session_id="default"):
     }
 
 async def rag_for_uploaded_files(question, file_context, session_id, filenames=[]):
-    used_context = file_context[:10000] + "..." if len(file_context) > 10000 else file_context
+    used_context = file_context[:30000] + "..." if len(file_context) > 30000 else file_context
     ans = await ainvoke_chain_with_history(FILE_ONLY_SYSTEM_PROMPT, question, used_context, session_id)
     real_sources = filenames if filenames else ["Uploaded File"]
     return {"answer": ans, "context": used_context, "sources": real_sources}
@@ -646,14 +646,12 @@ async def rag_for_version_comparison(question, file_context, session_id, filenam
     old_docs = await async_similarity_search(rule_vectorstore, search_q, k=5)
     old_ctx = "\n".join([d.page_content for d in old_docs])
     
-    full_ctx = f"[OLD Rules]\n{old_ctx}\n\n[NEW File]\n{file_context[:5000]}..."
+    full_ctx = f"[OLD Rules]\n{old_ctx}\n\n[NEW File]\n{file_context[:30000]}..."
     sources = extract_sources(old_docs)
     if filenames: sources.extend(filenames)
     else: sources.append("Uploaded File")
     
-    ans = await ainvoke_chain_with_history(
-        VERSION_COMPARE_SYSTEM_PROMPT, question, full_ctx, session_id
-    )
+    ans = await ainvoke_chain_with_history(VERSION_COMPARE_SYSTEM_PROMPT, question, full_ctx, session_id)
     return {"answer": ans, "context": full_ctx, "sources": sources}
 
 async def rag_for_cross_check(question, session_id, file_context=None, filenames=[]):
@@ -668,7 +666,7 @@ async def rag_for_cross_check(question, session_id, file_context=None, filenames
     kw = await extract_keyword(question)
     if kw != "FALSE": db_ctx += "\n" + search_db_metadata(kw)
 
-    file_info = f"[FILE]\n{file_context[:2000]}" if file_context else ""
+    file_info = f"[FILE]\n{file_context[:30000]}" if file_context else ""
     full_ctx = f"{file_info}\n\n[규정]\n{rule_ctx}\n\n[DB 스키마]\n{db_ctx}"
     
     sources = extract_sources(rule_docs + db_schema_docs)
@@ -676,9 +674,7 @@ async def rag_for_cross_check(question, session_id, file_context=None, filenames
         if filenames: sources.extend(filenames)
         else: sources.append("Uploaded File")
 
-    ans = await ainvoke_chain_with_history(
-        CROSS_CHECK_SYSTEM_PROMPT, question, full_ctx, session_id
-    )
+    ans = await ainvoke_chain_with_history(CROSS_CHECK_SYSTEM_PROMPT, question, full_ctx, session_id)
     return {"answer": ans, "context": full_ctx, "sources": sources}
 
 async def analyze_code_context(question, full_context, session_id):
@@ -934,7 +930,7 @@ async def mcp_db_node(state: AgentState):
     # 3. MCP 서버 검색 및 컨텍스트 구성
     if keyword and mcp_manager.session:
         try:
-            # MCP 툴 호출 (여기서 SQL이 컬럼 정보를 포함하도록 수정되어 있어야 함)
+            # MCP 툴 호출
             mcp_res = await mcp_manager.session.call_tool(
                 "search_metadata", 
                 {"keyword": keyword, "include_code": False}
@@ -944,11 +940,9 @@ async def mcp_db_node(state: AgentState):
                 raw_result = mcp_res.content[0].text
 
                 if "검색 결과 없음" not in raw_result:
-                    # [핵심 추가] LLM이 추측하지 않도록 가독성 있게 포맷팅
-                    # 만약 raw_result가 줄바꿈으로 구분된 데이터라면 여기서 예쁘게 다듬음
                     formatted_context = f"\n### 🔍 DB 검색 결과 (키워드: {keyword})\n"
                     formatted_context += "아래는 검색된 테이블의 실제 스키마 정보입니다. 반드시 이 컬럼명만 사용하세요.\n"
-                    formatted_context += raw_result  # MCP 서버에서 이미 포맷팅해서 준다면 그대로 사용
+                    formatted_context += raw_result
                     
                     db_context = formatted_context
                 else:
